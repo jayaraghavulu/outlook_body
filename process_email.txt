@@ -1,6 +1,7 @@
 import extract_msg
-import pandas as pd
 import io
+import os
+import tempfile
 from bs4 import BeautifulSoup
 
 def extract_clean_body(raw_body):
@@ -96,21 +97,57 @@ def parse_msg_file(msg_path):
     raw_body = msg.htmlBody or msg.rtfBody or msg.body
     clean_body = extract_clean_body(raw_body)
 
-    # Extract Excel attachments as DataFrames (in memory)
-    excel_attachments = []
-    for att in msg.attachments:
+    # Extract Excel attachments and save to temporary files
+    # Extract Excel attachments and save to temporary files
+    excel_attachment_paths = []
+    excel_attachment_paths = []
+    # print(f"DEBUG: Found {len(msg.attachments)} attachments.") # Removed debug
+    for i, att in enumerate(msg.attachments):
+        # print(f"DEBUG: Processing attachment {i}: {att}") # Removed debug
         filename = att.longFilename or att.shortFilename
+        # print(f"DEBUG: Attachment {i} filename: {filename}") # Removed debug
+
+        # Remove potential trailing null bytes from the filename
+        if filename:
+            filename = filename.strip('\x00')
+            # print(f"DEBUG: Cleaned Attachment {i} filename: '{filename}'") # Removed debug
+
+        try:
+            data_size = len(att.data) if att.data else 0
+            # print(f"DEBUG: Attachment {i} data size: {data_size} bytes") # Removed debug
+        except Exception as data_e:
+            # print(f"DEBUG: Could not get data size for attachment {i}: {data_e}") # Removed debug
+            data_size = 0 # Assume 0 if data access fails
+
+        # print(f"DEBUG: Attachment {i} filename for check: '{filename}'") # Removed debug
+        # print(f"DEBUG: Attachment {i} filename repr: {repr(filename)}") # Removed debug
+        # print(f"DEBUG: Attachment {i} filename length: {len(filename) if filename else 0}") # Removed debug
+        # print(f"DEBUG: Attachment {i} filename lower: '{filename.lower() if filename else None}'") # Removed debug
+        # print(f"DEBUG: Attachment {i} endswith check: {filename.lower().endswith(('.xls', '.xlsx')) if filename else False}") # Removed debug
+
         if filename and filename.lower().endswith(('.xls', '.xlsx')):
-            try:
-                file_data = att.data  # Raw bytes
-                excel_file = io.BytesIO(file_data)
-                df = pd.read_excel(excel_file)
-                excel_attachments.append({
-                    "filename": filename,
-                    "dataframe": df
-                })
-            except Exception as e:
-                print(f"Failed to read Excel attachment '{filename}': {e}")
+            if data_size > 0:
+                try:
+                    file_data = att.data  # Raw bytes
+                    # Create a temporary file to save the Excel data
+                    # Use a suffix to retain the original file extension
+                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1])
+                    temp_file.write(file_data)
+                    temp_file.close()
+                    excel_attachment_paths.append({
+                        "filename": filename,
+                        "path": temp_file.name
+                    })
+                    print(f"DEBUG: Successfully processed Excel attachment '{filename}'.")
+                except Exception as e:
+                    print(f"DEBUG: Failed to save Excel attachment '{filename}' to temp file: {e}")
+            else:
+                 # print(f"DEBUG: Skipping Excel attachment '{filename}' with no data.") # Removed debug
+                 pass # Keep silent if no data
+        else:
+            # print(f"DEBUG: Skipping non-Excel attachment or attachment with no filename: {filename}") # Removed debug
+            pass # Keep silent for non-Excel or no filename
+
 
     return {
         "Subject": subject,
@@ -119,13 +156,15 @@ def parse_msg_file(msg_path):
         "CC": cc,
         "Date": date,
         "Body": clean_body,
-        "ExcelAttachments": excel_attachments
+        "ExcelAttachmentPaths": excel_attachment_paths # Changed key here
     }
 
 # Example usage
 if __name__ == "__main__":
-    msg_file = r"before_migration_emails\Excel Table Email check.msg"  # Replace with your .msg file path
-    email_data = parse_msg_file(msg_file)
+    # Test parsing a specific file reported to have issues with attachments
+    msg_file_to_test = r"after_migration_emails\Example with Attachment.msg"
+    print(f"Testing parsing of: {msg_file_to_test}")
+    email_data = parse_msg_file(msg_file_to_test)
 
     print("Subject:", email_data["Subject"])
     print("From:", email_data["Sender"])
@@ -133,6 +172,11 @@ if __name__ == "__main__":
     print("Date:", email_data["Date"])
     print("Body:\n", email_data["Body"])
 
-    for attachment in email_data["ExcelAttachments"]:
-        print(f"\nAttachment: {attachment['filename']}")
-        print(attachment["dataframe"])
+    # Example usage for new structure
+    if email_data.get("ExcelAttachmentPaths"):
+        print("\nDetected Excel Attachments:")
+        for attachment_info in email_data["ExcelAttachmentPaths"]:
+            print(f"- Filename: {attachment_info['filename']}")
+            print(f"  Saved to temporary path: {attachment_info['path']}")
+    else:
+        print("\nNo Excel attachments detected.")
