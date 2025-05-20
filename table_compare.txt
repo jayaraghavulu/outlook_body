@@ -1,138 +1,189 @@
-import extract_msg
-import pandas as pd
-import io
-from bs4 import BeautifulSoup
+import os
+import json
+import sys
+from dotenv import load_dotenv # Import load_dotenv
+# Add the directory containing process_email.py to the Python path
+sys.path.append('.')
+from process_email import parse_msg_file # Assuming process_email.py is in the same directory
 
-def extract_clean_body(raw_body):
+# Load environment variables from .env file
+load_dotenv()
+
+# Import and configure Gemini API client based on the notebook
+from google import genai
+API_KEY = os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    print("Error: GEMINI_API_KEY environment variable not set. Create a .env file with GEMINI_API_KEY=YOUR_API_KEY")
+    sys.exit(1)
+client = genai.Client(api_key=API_KEY)
+
+# Define directories
+BEFORE_DIR = 'before_migration_emails'
+AFTER_DIR = 'after_migration_emails'
+OUTPUT_DIR = 'comparison_results'
+
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+def compare_email_content(old_content, new_content):
     """
-    Convert HTML or RTF email body to plain text, preserving table structure.
-    Handles bytes or string input.
+    Constructs the prompt and calls the Gemini API for comparison.
     """
-    if isinstance(raw_body, bytes):
-        try:
-            # Most Outlook HTML bodies are ISO-8859-1 encoded
-            html = raw_body.decode('iso-8859-1', errors='ignore')
-        except Exception as e:
-            print("Decoding failed:", e)
-            return None
-    else:
-        html = raw_body
+    # Define the desired JSON structure as a string for the prompt
+    json_structure_definition = """
+{
+  "comparison_status": "Match" | "Differences Found",
+  "subject_comparison": {
+    "status": "Match" | "Difference",
+    "expected_subject": "...",
+    "actual_subject": "...",
+    "details": "..."
+  },
+  "body_text_comparison": {
+    "status": "Match" | "Differences Found",
+    "details": [
+      {
+        "type": "Missing Text" | "Extra Text" | "Text Mismatch" | "Formatting/Spacing Difference",
+        "location": "e.g., paragraph number, line number",
+        "expected_snippet": "...",
+        "actual_snippet": "...",
+        "description": "..."
+      }
+    ]
+  },
+  "table_comparison": {
+    "status": "Match" | "Differences Found",
+    "details": [
+      {
+        "type": "Missing Row" | "Extra Row" | "Row Mismatch" | "Cell Value Mismatch" | "Formatting/Structure Difference",
+        "location": "e.g., row number, column header",
+        "expected_value": "...",
+        "actual_value": "...",
+        "expected_row_snippet": "...",
+        "actual_row_snippet": "...",
+        "description": "..."
+      }
+    ]
+  },
+  "overall_summary": "A summary of the comparison results."
+}
+"""
 
-    soup = BeautifulSoup(html, 'html.parser')
+    prompt = f"""
+You are a Quality Assurance (QA) assistant specializing in comparing email content after a migration.
+Your task is to compare two versions of an email (an 'Expected' version and an 'Actual' version) and report any differences in the Subject, Body text, and the Markdown table contained within the Body.
 
-    # Find all tables and replace them with their text representation
-    for table in soup.find_all('table'):
-        table_text = format_table_as_text(table)
-        # Create a new tag to hold the text representation
-        text_node = soup.new_tag("pre") # Use pre to preserve formatting
-        text_node.string = table_text
-        table.replace_with(text_node)
+Focus on identifying even subtle differences, such as variations in wording, numbers, spacing, or formatting within the table.
 
-    # Get the text of the modified soup, using newline as separator
-    clean_text = soup.get_text(separator="\n", strip=True)
+Provide your comparison report in the following JSON format:
+{json_structure_definition}
 
-    return clean_text
+Here are the two email versions:
 
-def format_table_as_text(table_soup):
-    """
-    Formats a BeautifulSoup table element into a text-based representation.
-    """
-    rows = table_soup.find_all('tr')
-    if not rows:
-        return ""
+---
+Expected Email:
+{old_content}
+---
 
-    # Determine column widths
-    col_widths = []
-    for row in rows:
-        cells = row.find_all(['td', 'th'])
-        for i, cell in enumerate(cells):
-            cell_text = cell.get_text(strip=True)
-            if i >= len(col_widths):
-                col_widths.append(len(cell_text))
-            else:
-                col_widths[i] = max(col_widths[i], len(cell_text))
+---
+Actual Email:
+{new_content}
+---
 
-    # Build the text table
-    table_text = ""
-    # Add top border
-    separator_line = "+"
-    for width in col_widths:
-        separator_line += "-" * (width + 2) + "+" # +2 for padding spaces
-    table_text += separator_line + "\n"
+Please analyze the content and generate the JSON comparison report. Ensure the JSON is valid and strictly follows the defined structure.
+"""
 
-    for row in rows:
-        cells = row.find_all(['td', 'th'])
-        row_text = "|"
-        for i, cell in enumerate(cells):
-            cell_text = cell.get_text(strip=True)
-            # Pad cell text
-            padded_text = cell_text.ljust(col_widths[i])
-            row_text += f" {padded_text} |"
-        table_text += row_text + "\n"
+    print("Sending prompt to Gemini API...")
+    try:
+        # Ensure genai client is initialized globally or passed in
+        # model = 'gemini-2.0-flash' # Or other suitable model
+        # response = client.generate_content(model=model, contents=prompt)
+        # print("Received response from API.")
+        # response_text = response.text.strip()
 
-        # Add separator line after each row
-        separator_line = "+"
-        for width in col_widths:
-            separator_line += "-" * (width + 2) + "+" # +2 for padding spaces
-        table_text += separator_line + "\n"
+        # Call the Gemini API using the method from the notebook
+        model = 'gemini-2.0-flash' # Or other suitable model
+        response = client.models.generate_content(model=model, contents=prompt)
+        print("Received response from API.")
+        response_text = response.text.strip()
 
-    return table_text
+        # Attempt to find and parse the JSON string
+        # This handles cases where the API response might include markdown formatting
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
 
-def parse_msg_file(msg_path):
-    """
-    Parses a .msg Outlook file and returns its content as a dictionary.
-    Extracts subject, sender, recipients, body, and Excel attachments.
-    """
-    msg = extract_msg.Message(msg_path)
-
-    # Extract metadata
-    subject = msg.subject
-    sender = msg.sender
-    to = msg.to
-    cc = msg.cc
-    date = msg.date
-
-    # Extract and clean body
-    raw_body = msg.htmlBody or msg.rtfBody or msg.body
-    clean_body = extract_clean_body(raw_body)
-
-    # Extract Excel attachments as DataFrames (in memory)
-    excel_attachments = []
-    for att in msg.attachments:
-        filename = att.longFilename or att.shortFilename
-        if filename and filename.lower().endswith(('.xls', '.xlsx')):
+        if json_start != -1 and json_end != -1:
+            json_string = response_text[json_start:json_end]
             try:
-                file_data = att.data  # Raw bytes
-                excel_file = io.BytesIO(file_data)
-                df = pd.read_excel(excel_file)
-                excel_attachments.append({
-                    "filename": filename,
-                    "dataframe": df
-                })
-            except Exception as e:
-                print(f"Failed to read Excel attachment '{filename}': {e}")
+                comparison_report = json.loads(json_string)
+                print("Successfully parsed JSON response.")
+                return comparison_report
+            except json.JSONDecodeError as e:
+                print(f"\nError decoding JSON from API response: {e}")
+                print("Raw API response text:")
+                print(response_text)
+                return {"error": "JSON decoding failed", "details": str(e), "raw_response": response_text}
+        else:
+            print("\nCould not find valid JSON in the API response.")
+            print("Raw API response text:")
+            print(response_text)
+            return {"error": "No JSON found in response", "raw_response": response_text}
 
-    return {
-        "Subject": subject,
-        "Sender": sender,
-        "To": to,
-        "CC": cc,
-        "Date": date,
-        "Body": clean_body,
-        "ExcelAttachments": excel_attachments
-    }
+    except Exception as e:
+        print(f"\nAn error occurred during API call or processing: {e}")
+        return {"error": "API call or processing failed", "details": str(e)}
 
-# Example usage
+def main():
+    """
+    Main function to iterate through emails and perform comparisons.
+    """
+    print(f"Processing emails in '{BEFORE_DIR}' and '{AFTER_DIR}'...")
+
+    before_files = [f for f in os.listdir(BEFORE_DIR) if f.endswith('.msg')]
+
+    for filename in before_files:
+        before_path = os.path.join(BEFORE_DIR, filename)
+        after_path = os.path.join(AFTER_DIR, filename) # Assuming same filename convention
+
+        if not os.path.exists(after_path):
+            print(f"Warning: Corresponding file not found in '{AFTER_DIR}' for '{filename}'. Skipping.")
+            continue
+
+        print(f"\nComparing email: {filename}")
+
+        try:
+            # Extract content from both emails
+            before_email_data = parse_msg_file(before_path)
+            after_email_data = parse_msg_file(after_path)
+
+            # Prepare content for comparison (adjust based on actual data structure from parse_msg_file)
+            # Assuming parse_msg_file returns a dict with 'Subject' and 'Body' keys
+            old_subject = before_email_data.get('Subject', '')
+            old_body = before_email_data.get('Body', '') # Need to handle attachments/tables later
+
+            new_subject = after_email_data.get('Subject', '')
+            new_body = after_email_data.get('Body', '') # Need to handle attachments/tables later
+
+            # Combine subject and body for the prompt as done in the notebook
+            old_content = f"Subject: {old_subject}\n\nBody:\n{old_body}"
+            new_content = f"Subject: {new_subject}\n\nBody:\n{new_body}"
+
+
+            # Perform comparison using LLM
+            comparison_report = compare_email_content(old_content, new_content)
+
+            # Save the comparison report
+            output_filename = os.path.splitext(filename)[0] + "_comparison.json"
+            output_path = os.path.join(OUTPUT_DIR, output_filename)
+            with open(output_path, 'w') as f:
+                json.dump(comparison_report, f, indent=2)
+
+            print(f"Comparison report saved to '{output_path}'")
+
+        except Exception as e:
+            print(f"Error processing '{filename}': {e}")
+
+    print("\nEmail comparison process finished.")
+
 if __name__ == "__main__":
-    msg_file = r"before_migration_emails\Excel Table Email check.msg"  # Replace with your .msg file path
-    email_data = parse_msg_file(msg_file)
-
-    print("Subject:", email_data["Subject"])
-    print("From:", email_data["Sender"])
-    print("To:", email_data["To"])
-    print("Date:", email_data["Date"])
-    print("Body:\n", email_data["Body"])
-
-    for attachment in email_data["ExcelAttachments"]:
-        print(f"\nAttachment: {attachment['filename']}")
-        print(attachment["dataframe"])
+    main()
