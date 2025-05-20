@@ -1,0 +1,138 @@
+import extract_msg
+import pandas as pd
+import io
+from bs4 import BeautifulSoup
+
+def extract_clean_body(raw_body):
+    """
+    Convert HTML or RTF email body to plain text, preserving table structure.
+    Handles bytes or string input.
+    """
+    if isinstance(raw_body, bytes):
+        try:
+            # Most Outlook HTML bodies are ISO-8859-1 encoded
+            html = raw_body.decode('iso-8859-1', errors='ignore')
+        except Exception as e:
+            print("Decoding failed:", e)
+            return None
+    else:
+        html = raw_body
+
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Find all tables and replace them with their text representation
+    for table in soup.find_all('table'):
+        table_text = format_table_as_text(table)
+        # Create a new tag to hold the text representation
+        text_node = soup.new_tag("pre") # Use pre to preserve formatting
+        text_node.string = table_text
+        table.replace_with(text_node)
+
+    # Get the text of the modified soup, using newline as separator
+    clean_text = soup.get_text(separator="\n", strip=True)
+
+    return clean_text
+
+def format_table_as_text(table_soup):
+    """
+    Formats a BeautifulSoup table element into a text-based representation.
+    """
+    rows = table_soup.find_all('tr')
+    if not rows:
+        return ""
+
+    # Determine column widths
+    col_widths = []
+    for row in rows:
+        cells = row.find_all(['td', 'th'])
+        for i, cell in enumerate(cells):
+            cell_text = cell.get_text(strip=True)
+            if i >= len(col_widths):
+                col_widths.append(len(cell_text))
+            else:
+                col_widths[i] = max(col_widths[i], len(cell_text))
+
+    # Build the text table
+    table_text = ""
+    # Add top border
+    separator_line = "+"
+    for width in col_widths:
+        separator_line += "-" * (width + 2) + "+" # +2 for padding spaces
+    table_text += separator_line + "\n"
+
+    for row in rows:
+        cells = row.find_all(['td', 'th'])
+        row_text = "|"
+        for i, cell in enumerate(cells):
+            cell_text = cell.get_text(strip=True)
+            # Pad cell text
+            padded_text = cell_text.ljust(col_widths[i])
+            row_text += f" {padded_text} |"
+        table_text += row_text + "\n"
+
+        # Add separator line after each row
+        separator_line = "+"
+        for width in col_widths:
+            separator_line += "-" * (width + 2) + "+" # +2 for padding spaces
+        table_text += separator_line + "\n"
+
+    return table_text
+
+def parse_msg_file(msg_path):
+    """
+    Parses a .msg Outlook file and returns its content as a dictionary.
+    Extracts subject, sender, recipients, body, and Excel attachments.
+    """
+    msg = extract_msg.Message(msg_path)
+
+    # Extract metadata
+    subject = msg.subject
+    sender = msg.sender
+    to = msg.to
+    cc = msg.cc
+    date = msg.date
+
+    # Extract and clean body
+    raw_body = msg.htmlBody or msg.rtfBody or msg.body
+    clean_body = extract_clean_body(raw_body)
+
+    # Extract Excel attachments as DataFrames (in memory)
+    excel_attachments = []
+    for att in msg.attachments:
+        filename = att.longFilename or att.shortFilename
+        if filename and filename.lower().endswith(('.xls', '.xlsx')):
+            try:
+                file_data = att.data  # Raw bytes
+                excel_file = io.BytesIO(file_data)
+                df = pd.read_excel(excel_file)
+                excel_attachments.append({
+                    "filename": filename,
+                    "dataframe": df
+                })
+            except Exception as e:
+                print(f"Failed to read Excel attachment '{filename}': {e}")
+
+    return {
+        "Subject": subject,
+        "Sender": sender,
+        "To": to,
+        "CC": cc,
+        "Date": date,
+        "Body": clean_body,
+        "ExcelAttachments": excel_attachments
+    }
+
+# Example usage
+if __name__ == "__main__":
+    msg_file = r"before_migration_emails\Excel Table Email check.msg"  # Replace with your .msg file path
+    email_data = parse_msg_file(msg_file)
+
+    print("Subject:", email_data["Subject"])
+    print("From:", email_data["Sender"])
+    print("To:", email_data["To"])
+    print("Date:", email_data["Date"])
+    print("Body:\n", email_data["Body"])
+
+    for attachment in email_data["ExcelAttachments"]:
+        print(f"\nAttachment: {attachment['filename']}")
+        print(attachment["dataframe"])
