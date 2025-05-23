@@ -7,7 +7,8 @@ from dotenv import load_dotenv # Import load_dotenv
 # Add the directory containing process_email.py to the Python path
 sys.path.append('.')
 from process_email import parse_msg_file # Assuming process_email.py is in the same directory
-from convert_excel import excel_to_pdf # Import the conversion function
+# Remove the import of excel_to_pdf
+# from convert_excel import excel_to_pdf # Import the conversion function
 
 # Load environment variables from .env file
 load_dotenv()
@@ -16,8 +17,9 @@ load_dotenv()
 from google import genai
 from google.genai import types # Import types for file upload
 import httpx # Import httpx for file upload
+from tenacity import retry, wait_random_exponential, stop_after_attempt # Import retry components
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = "AIzaSyDZW6NCGf3OTAqUlkPeY3_fyrBc0jbpAlE"
 if not API_KEY:
     print("Error: GEMINI_API_KEY environment variable not set. Create a .env file with GEMINI_API_KEY=YOUR_API_KEY")
     sys.exit(1)
@@ -28,10 +30,14 @@ BEFORE_DIR = 'before_migration_emails'
 AFTER_DIR = 'after_migration_emails'
 OUTPUT_DIR = 'comparison_results'
 ATTACHMENT_PDFS_DIR = 'attachment_pdfs' # New directory for converted PDFs
+# New directory for extracted Excel text files
+EXTRACTED_EXCEL_TEXT_DIR = 'extracted_excel_text'
 
 # Ensure output and attachment PDF directories exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(ATTACHMENT_PDFS_DIR, exist_ok=True)
+# Ensure the new directory exists
+os.makedirs(EXTRACTED_EXCEL_TEXT_DIR, exist_ok=True)
 
 def compare_email_content(old_content, new_content):
     """
@@ -86,10 +92,17 @@ Please analyze the content and generate the JSON comparison report. Ensure the J
 """
 
     print("Sending text comparison prompt to Gemini API...")
+    @retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(5))
+    def call_gemini_text_comparison(model, contents):
+        """Helper function to call Gemini API with retry."""
+        print("Attempting Gemini API call for text comparison...")
+        response = client.models.generate_content(model=model, contents=contents)
+        print("Received response from API.")
+        return response
+
     try:
         model = 'gemini-2.0-flash' # Or other suitable model
-        response = client.models.generate_content(model=model, contents=prompt)
-        print("Received response from API.")
+        response = call_gemini_text_comparison(model=model, contents=prompt)
         response_text = response.text.strip()
 
         json_start = response_text.find('{')
@@ -116,14 +129,34 @@ Please analyze the content and generate the JSON comparison report. Ensure the J
         print(f"\nAn error occurred during API call or processing: {e}")
         return {"error": "API call or processing failed", "details": str(e)}
 
-def compare_excel_pdfs(before_pdf_path, after_pdf_path):
+# Remove the compare_excel_pdfs function
+
+def compare_excel_text(before_text_path, after_text_path):
     """
-    Compares two PDF files generated from Excel attachments using Gemini API.
+    Compares the extracted Markdown text content of Excel attachments using Gemini API.
+    Reads content from the provided file paths.
     """
+    try:
+        with open(before_text_path, 'r') as f:
+            before_excel_text_data = json.load(f)
+        with open(after_text_path, 'r') as f:
+            after_excel_text_data = json.load(f)
+    except FileNotFoundError as e:
+        print(f"Error reading extracted Excel text files: {e}")
+        return {"error": "Failed to read extracted Excel text files", "details": str(e)}
+    except json.JSONDecodeError as e:
+        print(f"Error decoding JSON from extracted Excel text files: {e}")
+        return {"error": "Failed to decode JSON from extracted Excel text files", "details": str(e)}
+    except Exception as e:
+        print(f"An unexpected error occurred while reading extracted Excel text files: {e}")
+        return {"error": "Unexpected error reading extracted Excel text files", "details": str(e)}
+
+
     prompt = """
-You are a Quality Assurance (QA) assistant specializing in comparing the content and formatting of documents, specifically focusing on tables originating from Excel sheets.
-Your task is to compare two PDF documents, an 'Expected' version and an 'Actual' version, which were generated from Excel attachments.
-Analyze the content, structure, and formatting of the tables within these PDFs.
+You are a Quality Assurance (QA) assistant specializing in comparing the content and structure of tables originating from Excel sheets, provided as Markdown text.
+Your task is to compare two versions of extracted Excel content (an 'Expected' version and an 'Actual' version). The content is structured by sheet name, with each sheet containing one or more tables formatted in Markdown.
+
+Analyze the content, structure, and formatting of the tables within this text.
 Report any differences found in data values, missing or extra rows/columns, formatting inconsistencies, or structural variations.
 
 Provide your comparison report for the tables in the following JSON format:
@@ -132,8 +165,8 @@ Provide your comparison report for the tables in the following JSON format:
     "status": "Match" | "Differences Found",
     "details": [
       {
-        "type": "Missing Row" | "Extra Row" | "Row Mismatch" | "Cell Value Mismatch" | "Formatting/Structure Difference" | "Other Difference",
-        "location": "e.g., page number, table number, row number, column header",
+        "type": "Missing Sheet" | "Extra Sheet" | "Sheet Mismatch" | "Missing Table" | "Extra Table" | "Table Mismatch" | "Cell Value Mismatch" | "Formatting/Structure Difference" | "Other Difference",
+        "location": "e.g., Sheet name, Table number within sheet, row number, column header",
         "expected_snippet": "...",
         "actual_snippet": "...",
         "description": "..."
@@ -142,44 +175,57 @@ Provide your comparison report for the tables in the following JSON format:
   }
 }
 
-Analyze the provided PDF documents and generate the JSON comparison report for the tables. Ensure the JSON is valid and strictly follows the defined structure.
+Here is the extracted Excel content for comparison:
+
+---
+Expected Excel Content:
 """
 
-    print(f"Sending PDF comparison prompt for '{os.path.basename(before_pdf_path)}' and '{os.path.basename(after_pdf_path)}' to Gemini API...")
+    # Format the before_excel_text_data
+    for sheet_name, tables in before_excel_text_data.items():
+        prompt += f"\nSheet: {sheet_name}\n"
+        for i, table in enumerate(tables):
+            prompt += f"\nTable {i+1}:\n{table}\n"
+
+    prompt += """
+---
+
+---
+Actual Excel Content:
+"""
+
+    # Format the after_excel_text_data
+    for sheet_name, tables in after_excel_text_data.items():
+        prompt += f"\nSheet: {sheet_name}\n"
+        for i, table in enumerate(tables):
+            prompt += f"\nTable {i+1}:\n{table}\n"
+
+    prompt += """
+---
+
+Analyze the provided Excel content (structured by sheet and Markdown tables) and generate the JSON comparison report for the tables. Ensure the JSON is valid and strictly follows the defined structure.
+"""
+
+    print("Sending Excel text comparison prompt to Gemini API...")
     try:
-        # Upload PDFs using the File API
-        before_file = client.files.upload(file=before_pdf_path, config=dict(mime_type='application/pdf'))
-        after_file = client.files.upload(file=after_pdf_path, config=dict(mime_type='application/pdf'))
+        token_count_response = client.models.count_tokens(model='gemini-1.5-flash', contents=prompt)
+        print(f"Excel comparison prompt token count: {token_count_response.total_tokens}")
+    except Exception as e:
+        print(f"Error counting tokens for Excel comparison prompt: {e}")
 
-        # Wait for files to be active (optional but good practice for large files)
-        # while before_file.state.is_processing():
-        #     time.sleep(1)
-        #     before_file = client.files.get(before_file.name)
-        # while after_file.state.is_processing():
-        #     time.sleep(1)
-        #     after_file = client.files.get(after_file.name)
-
-        print("PDF files uploaded to Gemini API.")
-
-        # Call the Gemini API with the uploaded files and prompt
-        model = 'gemini-1.5-flash' # Or other suitable model
-        response = client.models.generate_content(
-            model=model,
-            contents=[before_file, after_file, prompt]
-        )
+    @retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(5))
+    def call_gemini_excel_comparison(model, contents):
+        """Helper function to call Gemini API with retry for Excel comparison."""
+        print("Attempting Gemini API call for Excel comparison...")
+        response = client.models.generate_content(model=model, contents=contents)
         print("Received response from API.")
+        return response
+
+    try:
+        # Use a model capable of handling longer contexts if needed, e.g., gemini-1.5-flash
+        model = 'gemini-2.0-flash'
+        response = call_gemini_excel_comparison(model=model, contents=prompt)
         response_text = response.text.strip()
-
-        # Delete files from Gemini API after use
-        # Delete files from Gemini API after use (Removing calls based on documentation and error)
-        # print(f"DEBUG: Type of before_file.name: {type(before_file.name)}") # Keep debug logs commented out
-        # print(f"DEBUG: Value of before_file.name: {before_file.name}")
-        # print(f"DEBUG: Type of after_file.name: {type(after_file.name)}")
-        # print(f"DEBUG: Value of after_file.name: {after_file.name}")
-        # client.files.delete(before_file.name) # Removed
-        # client.files.delete(after_file.name) # Removed
-        print("Skipping manual deletion of uploaded files from Gemini API as per documentation.")
-
 
         json_start = response_text.find('{')
         json_end = response_text.rfind('}') + 1
@@ -202,7 +248,7 @@ Analyze the provided PDF documents and generate the JSON comparison report for t
             return {"error": "No JSON found in response", "raw_response": response_text}
 
     except Exception as e:
-        print(f"\nAn error occurred during API call or processing for PDF comparison: {e}")
+        print(f"\nAn error occurred during API call or processing for Excel text comparison: {e}")
         return {"error": "API call or processing failed", "details": str(e)}
 
 
@@ -243,71 +289,65 @@ def main():
             text_comparison_report = compare_email_content(old_content, new_content)
 
             # --- Step 2: Process and Compare Excel Attachments ---
+            # --- Step 2: Process and Compare Excel Attachments ---
             excel_comparison_report = {"table_comparison": {"status": "No Attachments", "details": []}}
-            before_excel_attachments = before_email_data.get('ExcelAttachmentPaths', [])
-            after_excel_attachments = after_email_data.get('ExcelAttachmentPaths', [])
+            before_excel_content = before_email_data.get('ExcelAttachmentContent', [])
+            after_excel_content = after_email_data.get('ExcelAttachmentContent', [])
 
-            if before_excel_attachments or after_excel_attachments:
+            if before_excel_content or after_excel_content:
                  excel_comparison_report["table_comparison"]["status"] = "Attachments Found"
-                 excel_comparison_report["table_comparison"]["details"].append({"description": f"Found {len(before_excel_attachments)} Excel attachments in before email and {len(after_excel_attachments)} in after email."})
+                 excel_comparison_report["table_comparison"]["details"].append({"description": f"Found {len(before_excel_content)} Excel attachments in before email and {len(after_excel_content)} in after email."})
 
-            # Assuming attachments are in the same order and have the same filenames for comparison
-            # A more robust solution would match attachments by filename
-            min_attachments = min(len(before_excel_attachments), len(after_excel_attachments))
+            # Compare the extracted Excel text content
+            # A more robust solution would match attachments by filename before comparing content
+            # For now, assuming attachments are in the same order
+            min_attachments = min(len(before_excel_content), len(after_excel_content))
 
             for i in range(min_attachments):
-                before_att = before_excel_attachments[i]
-                after_att = after_excel_attachments[i]
+                before_att_content = before_excel_content[i]
+                after_att_content = after_excel_content[i]
 
-                att_filename = before_att['filename'] # Use before filename as reference
+                att_filename = before_att_content['filename'] # Use before filename as reference
 
                 print(f"Processing attachment: {att_filename}")
 
-                before_excel_path = before_att['path']
-                after_excel_path = after_att['path']
-
-                # Generate PDF paths in the dedicated attachment_pdfs directory
+                # Define paths for saving extracted text content
                 # Use email filename as a subdirectory to avoid naming conflicts
-                email_pdf_subdir = os.path.join(ATTACHMENT_PDFS_DIR, os.path.splitext(filename)[0])
-                os.makedirs(email_pdf_subdir, exist_ok=True) # Ensure subdirectory exists
+                email_text_subdir = os.path.join(EXTRACTED_EXCEL_TEXT_DIR, os.path.splitext(filename)[0])
+                os.makedirs(email_text_subdir, exist_ok=True) # Ensure subdirectory exists
 
-                before_pdf_path = os.path.join(email_pdf_subdir, f"before_{att_filename}.pdf")
-                after_pdf_path = os.path.join(email_pdf_subdir, f"after_{att_filename}.pdf")
+                before_text_path = os.path.join(email_text_subdir, f"before_{att_filename}.json")
+                after_text_path = os.path.join(email_text_subdir, f"after_{att_filename}.json")
 
-                # Convert Excel to PDF
-                before_conversion_success = excel_to_pdf(before_excel_path, before_pdf_path)
-                after_conversion_success = excel_to_pdf(after_excel_path, after_pdf_path)
-
-                # Clean up the temporary Excel files after conversion
+                # Save the extracted Markdown content to JSON files
                 try:
-                    os.remove(before_excel_path)
-                    print(f"Cleaned up temporary Excel file: {before_excel_path}")
-                except OSError as e:
-                    print(f"Error removing temporary Excel file {before_excel_path}: {e}")
+                    with open(before_text_path, 'w') as f:
+                        json.dump(before_att_content['content'], f, indent=2)
+                    print(f"Saved extracted text for '{att_filename}' (before) to '{before_text_path}'")
+                except Exception as e:
+                    print(f"Error saving extracted text for '{att_filename}' (before): {e}")
+                    # Handle error, maybe skip comparison for this attachment
+
                 try:
-                    os.remove(after_excel_path)
-                    print(f"Cleaned up temporary Excel file: {after_excel_path}")
-                except OSError as e:
-                    print(f"Error removing temporary Excel file {after_excel_path}: {e}")
+                    with open(after_text_path, 'w') as f:
+                        json.dump(after_att_content['content'], f, indent=2)
+                    print(f"Saved extracted text for '{att_filename}' (after) to '{after_text_path}'")
+                except Exception as e:
+                    print(f"Error saving extracted text for '{att_filename}' (after): {e}")
+                    # Handle error, maybe skip comparison for this attachment
 
+                # Call the new function to compare Excel text content, passing file paths
+                # Need to modify compare_excel_text to accept paths and read content
+                excel_text_comparison_result = compare_excel_text(before_text_path, after_text_path)
 
-                if before_conversion_success and after_conversion_success:
-                    # Compare the generated PDFs using Gemini
-                    pdf_comparison_result = compare_excel_pdfs(before_pdf_path, after_pdf_path)
-                    # Append PDF comparison details to the overall excel report
-                    if "table_comparison" in pdf_comparison_result:
-                         excel_comparison_report["table_comparison"]["details"].extend(pdf_comparison_result["table_comparison"]["details"])
-                         if pdf_comparison_result["table_comparison"]["status"] == "Differences Found":
-                             excel_comparison_report["table_comparison"]["status"] = "Differences Found"
-                    else:
-                         excel_comparison_report["table_comparison"]["details"].append({"description": f"Could not get table comparison for {att_filename}", "details": pdf_comparison_result})
-
+                # Append Excel text comparison details to the overall excel report
+                if "table_comparison" in excel_text_comparison_result:
+                     excel_comparison_report["table_comparison"]["details"].extend(excel_text_comparison_result["table_comparison"]["details"])
+                     if excel_text_comparison_result["table_comparison"]["status"] == "Differences Found":
+                         excel_comparison_report["table_comparison"]["status"] = "Differences Found"
                 else:
-                    excel_comparison_report["table_comparison"]["details"].append({
-                        "description": f"Skipped PDF comparison for '{att_filename}' due to conversion failure.",
-                        "before_conversion_success": before_conversion_success,
-                        "after_conversion_success": after_conversion_success
-                    })
+                     excel_comparison_report["table_comparison"]["details"].append({"description": f"Could not get table comparison for {att_filename}", "details": excel_text_comparison_result})
+
 
             # --- Step 3: Combine Results and Save Report ---
             final_comparison_report = {
